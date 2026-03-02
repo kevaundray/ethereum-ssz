@@ -687,3 +687,201 @@ def test_chained_decoding_error() -> None:
     data = b"\x00" * 8 + b"\x02"
     with pytest.raises(DecodingError, match="cannot decode field"):
         ssz.decode_to(Outer, data)
+
+
+# ======================================================================
+# Issue 3: Additional coverage tests
+# ======================================================================
+
+
+def test_decoding_error_non_decoding_cause() -> None:
+    """DecodingError with a non-DecodingError __cause__ formats with 'because'."""
+    inner = ValueError("bad value")
+    outer = DecodingError("cannot decode field `slot`")
+    outer.__cause__ = inner
+    result = str(outer)
+    assert "cannot decode field `slot`" in result
+    assert "because bad value" in result
+
+
+def test_decode_union_multiple_matching_variants() -> None:
+    """Union[bool, U8] with 1-byte data matches both variants."""
+    with pytest.raises(DecodingError, match="multiple matching union variants"):
+        ssz._decode_union(Union[bool, U8], b"\x01")
+
+
+def test_decode_unsupported_type() -> None:
+    """_decode_value raises DecodingError for unsupported type."""
+    with pytest.raises(DecodingError, match="unsupported type for SSZ decoding"):
+        ssz._decode_value(float, b"\x00")
+
+
+def test_decode_annotation_unsupported() -> None:
+    """_decode_annotation raises DecodingError for unsupported annotations."""
+    # dict[str, str] has origin=dict, which is not Union/tuple/list
+    with pytest.raises(DecodingError, match="unsupported annotation"):
+        ssz._decode_annotation(dict[str, str], b"\x00")
+
+
+def test_is_fixed_size_fixed_tuple() -> None:
+    """Tuple of fixed types is fixed-size."""
+    from typing import Tuple
+    assert _is_fixed_size(Tuple[U64, U32]) is True
+
+
+def test_is_fixed_size_bare_tuple() -> None:
+    """Bare Tuple (no args) is not fixed-size."""
+    from typing import Tuple
+    assert _is_fixed_size(Tuple) is False
+
+
+def test_is_fixed_size_unknown_type() -> None:
+    """_is_fixed_size returns False for unknown types."""
+    assert _is_fixed_size(float) is False
+
+
+def test_is_fixed_size_union() -> None:
+    """Union types are not fixed-size."""
+    assert _is_fixed_size(Union[U64, bool]) is False
+
+
+def test_fixed_size_of_raises_for_unsupported() -> None:
+    """_fixed_size_of raises EncodingError for unsupported types."""
+    with pytest.raises(EncodingError, match="cannot determine fixed size"):
+        _fixed_size_of(float)
+
+
+def test_encode_value_unsupported_type_hint() -> None:
+    """_encode_value raises EncodingError for unsupported type hints."""
+    with pytest.raises(EncodingError, match="unsupported type hint"):
+        ssz._encode_value(3.14, float)
+
+
+def test_decode_container_offset_before_fixed_part() -> None:
+    """Offset pointing into the fixed part raises DecodingError."""
+    # TwoVariable has: a(bytes, offset=4), b(bytes, offset=4), fixed(U32, 4)
+    # fixed_part_size = 4 + 4 + 4 = 12
+    # Craft data where first offset is 2 (< 12)
+    import struct
+    data = (
+        struct.pack("<I", 2)     # offset for a = 2 (invalid: < 12)
+        + struct.pack("<I", 12)  # offset for b = 12
+        + struct.pack("<I", 99)  # fixed = 99
+    )
+    with pytest.raises(DecodingError, match="before the end of the fixed part"):
+        ssz.decode_to(TwoVariable, data)
+
+
+def test_decode_container_offset_beyond_data() -> None:
+    """Offset beyond data length raises DecodingError."""
+    import struct
+    data = (
+        struct.pack("<I", 12)    # offset for a = 12
+        + struct.pack("<I", 999) # offset for b = 999 (beyond data)
+        + struct.pack("<I", 99)  # fixed = 99
+        + b"\x01\x02"           # variable data for a
+    )
+    with pytest.raises(DecodingError, match="beyond the data length"):
+        ssz.decode_to(TwoVariable, data)
+
+
+def test_decode_container_offsets_not_monotonic() -> None:
+    """Non-monotonically increasing offsets raise DecodingError."""
+    import struct
+    data = (
+        struct.pack("<I", 14)   # offset for a = 14
+        + struct.pack("<I", 12) # offset for b = 12 (< 14, not monotonic)
+        + struct.pack("<I", 99) # fixed = 99
+        + b"\x01\x02"          # some variable data
+        + b"\x03"
+    )
+    with pytest.raises(DecodingError, match="less than the previous offset"):
+        ssz.decode_to(TwoVariable, data)
+
+
+def test_decode_sequence_offset_beyond_data() -> None:
+    """Variable-size sequence with offset beyond data raises DecodingError."""
+    import struct
+    # Two elements: first_offset = 8, so num_elements = 2
+    # offsets: [8, 999]
+    data = (
+        struct.pack("<I", 8)
+        + struct.pack("<I", 999)  # beyond data
+        + b"\x01\x02"
+    )
+    with pytest.raises(DecodingError, match="beyond the data length"):
+        ssz._decode_sequence(data, bytes)
+
+
+def test_decode_sequence_offsets_not_monotonic() -> None:
+    """Variable-size sequence with non-monotonic offsets raises DecodingError."""
+    import struct
+    # Two elements: first_offset = 8, so num_elements = 2
+    # offsets: [8, 7] — 7 < 8, not monotonic
+    data = (
+        struct.pack("<I", 8)
+        + struct.pack("<I", 7)  # less than previous
+        + b"\x01\x02\x03\x04\x05\x06\x07\x08"
+    )
+    with pytest.raises(DecodingError, match="less than the previous offset"):
+        ssz._decode_sequence(data, bytes)
+
+
+def test_decode_sequence_variable_too_short() -> None:
+    """Variable-size sequence with data shorter than offset size raises DecodingError."""
+    with pytest.raises(DecodingError, match="data too short"):
+        ssz._decode_sequence(b"\x01\x02", bytes)
+
+
+def test_decode_sequence_invalid_first_offset() -> None:
+    """First offset not a multiple of BYTES_PER_LENGTH_OFFSET raises DecodingError."""
+    import struct
+    data = struct.pack("<I", 5)  # 5 is not a multiple of 4
+    with pytest.raises(DecodingError, match="not a multiple"):
+        ssz._decode_sequence(data, bytes)
+
+
+def test_decode_bytearray() -> None:
+    """Decoding to bytearray type works."""
+    result = ssz.decode_to(bytearray, b"\x01\x02")
+    assert result == b"\x01\x02"
+
+
+def test_encode_bytearray() -> None:
+    """Encoding a bytearray works."""
+    result = ssz.encode(bytearray(b"\x01\x02"))
+    assert result == b"\x01\x02"
+
+
+def test_annotated_with_multiple_metadata() -> None:
+    """Annotated with With codec and MaxLength decodes correctly
+    (Python flattens nested Annotated, so With + MaxLength appear in
+    the same Annotated layer)."""
+    @dataclass
+    class AnnotatedMulti:
+        value: Annotated[Annotated[U64, With(decode_custom)], MaxLength(10)]
+
+    data = ssz.encode(AnnotatedMulti(U64(42)))
+    result = ssz.decode_to(AnnotatedMulti, data)
+    assert result == AnnotatedMulti(U64(42))
+
+
+def test_annotated_flattened_two_with_raises() -> None:
+    """When Python flattens nested Annotated, multiple With codecs are detected."""
+    @dataclass
+    class BadAnnotated:
+        value: Annotated[Annotated[U64, With(decode_custom), With(decode_custom)], MaxLength(10)]
+
+    with pytest.raises(DecodingError, match="multiple ssz.With"):
+        ssz.decode_to(BadAnnotated, b"\x00" * 8)
+
+
+def test_annotated_flattened_no_with_unwraps() -> None:
+    """When Python flattens nested Annotated without With, it unwraps correctly."""
+    @dataclass
+    class PlainAnnotated:
+        value: Annotated[Annotated[U64, "some metadata"], MaxLength(10)]
+
+    data = ssz.encode(PlainAnnotated(U64(7)))
+    result = ssz.decode_to(PlainAnnotated, data)
+    assert result == PlainAnnotated(U64(7))

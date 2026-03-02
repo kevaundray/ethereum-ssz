@@ -512,6 +512,29 @@ def _decode_container(cls: Any, data: bytes) -> Any:
                 ) from e
             pos += size
 
+    # Validate variable field offsets
+    for i, (name, field_type, offset_val) in enumerate(variable_fields):
+        if offset_val < fixed_part_size:
+            raise DecodingError(
+                f"offset {offset_val} for field `{name}` of "
+                f"{cls.__name__} is before the end of the fixed "
+                f"part ({fixed_part_size})"
+            )
+        if offset_val > len(data):
+            raise DecodingError(
+                f"offset {offset_val} for field `{name}` of "
+                f"{cls.__name__} is beyond the data length "
+                f"({len(data)})"
+            )
+        if i > 0:
+            prev_offset = variable_fields[i - 1][2]
+            if offset_val < prev_offset:
+                raise DecodingError(
+                    f"offset {offset_val} for field `{name}` of "
+                    f"{cls.__name__} is less than the previous "
+                    f"offset ({prev_offset})"
+                )
+
     # Decode variable fields
     for i, (name, field_type, offset_val) in enumerate(variable_fields):
         if i + 1 < len(variable_fields):
@@ -646,6 +669,19 @@ def _decode_sequence(data: bytes, element_type: object) -> list:
             )[0]
             offsets.append(offset)
 
+        # Validate offsets
+        for i, offset in enumerate(offsets):
+            if offset > len(data):
+                raise DecodingError(
+                    f"offset {offset} at index {i} is beyond "
+                    f"the data length ({len(data)})"
+                )
+            if i > 0 and offset < offsets[i - 1]:
+                raise DecodingError(
+                    f"offset {offset} at index {i} is less than "
+                    f"the previous offset ({offsets[i - 1]})"
+                )
+
         result = []
         for i in range(num_elements):
             start = offsets[i]
@@ -668,7 +704,7 @@ def _decode_union(annotation: Any, data: bytes) -> Any:
         try:
             result = _decode_value(variant, data)
             successes.append(result)
-        except (DecodingError, Exception):
+        except (DecodingError, ValueError):
             failures.append(variant)
 
     if len(successes) == 1:
