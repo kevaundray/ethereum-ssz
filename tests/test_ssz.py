@@ -6,6 +6,7 @@ from ethereum_types.bytes import Bytes, Bytes4, Bytes32, Bytes48, Bytes96
 from ethereum_types.numeric import U8, U16, U32, U64, U256, Uint
 
 from ethereum_ssz import ssz
+from ethereum_ssz.ssz import _is_fixed_size, _fixed_size_of
 from ethereum_ssz.exceptions import DecodingError, EncodingError, SSZException
 
 
@@ -159,3 +160,210 @@ def test_decode_to_variable_bytes() -> None:
 def test_decode_to_variable_bytes_empty() -> None:
     result = ssz.decode_to(bytes, b"")
     assert result == b""
+
+
+# Task 6: Type utility tests
+
+def test_is_fixed_size_bool() -> None:
+    assert _is_fixed_size(bool) is True
+
+
+def test_is_fixed_size_uint() -> None:
+    assert _is_fixed_size(U64) is True
+
+
+def test_is_fixed_size_fixed_bytes() -> None:
+    assert _is_fixed_size(Bytes32) is True
+
+
+def test_is_fixed_size_variable_bytes() -> None:
+    assert _is_fixed_size(bytes) is False
+
+
+def test_is_fixed_size_list() -> None:
+    assert _is_fixed_size(list[U64]) is False
+
+
+def test_fixed_size_of_bool() -> None:
+    assert _fixed_size_of(bool) == 1
+
+
+def test_fixed_size_of_uint64() -> None:
+    assert _fixed_size_of(U64) == 8
+
+
+def test_fixed_size_of_uint256() -> None:
+    assert _fixed_size_of(U256) == 32
+
+
+def test_fixed_size_of_bytes32() -> None:
+    assert _fixed_size_of(Bytes32) == 32
+
+
+def test_fixed_size_of_bytes4() -> None:
+    assert _fixed_size_of(Bytes4) == 4
+
+
+# Task 7: Container encoding tests
+
+@dataclass
+class Point:
+    x: U64
+    y: U64
+
+
+@dataclass
+class Signed:
+    message: Bytes32
+    signature: Bytes96
+
+
+@dataclass
+class WithBool:
+    flag: bool
+    value: U64
+
+
+@dataclass
+class Variable:
+    fixed_val: U32
+    data: bytes
+
+
+@dataclass
+class TwoVariable:
+    a: bytes
+    b: bytes
+    fixed: U32
+
+
+def test_encode_container_fixed() -> None:
+    p = Point(U64(1), U64(2))
+    expected = (
+        b"\x01\x00\x00\x00\x00\x00\x00\x00"
+        b"\x02\x00\x00\x00\x00\x00\x00\x00"
+    )
+    assert ssz.encode(p) == expected
+
+
+def test_encode_container_fixed_bytes() -> None:
+    msg = Bytes32(b"\xab" * 32)
+    sig = Bytes96(b"\xcd" * 96)
+    s = Signed(msg, sig)
+    assert ssz.encode(s) == b"\xab" * 32 + b"\xcd" * 96
+
+
+def test_encode_container_with_bool() -> None:
+    w = WithBool(True, U64(42))
+    expected = b"\x01" + b"\x2a\x00\x00\x00\x00\x00\x00\x00"
+    assert ssz.encode(w) == expected
+
+
+def test_encode_container_variable() -> None:
+    v = Variable(U32(1), b"\xaa\xbb")
+    # Fixed part: U32(1) = 4 bytes + offset(4 bytes) = 8 bytes
+    # Offset points to byte 8
+    expected = (
+        b"\x01\x00\x00\x00"
+        b"\x08\x00\x00\x00"
+        b"\xaa\xbb"
+    )
+    assert ssz.encode(v) == expected
+
+
+def test_encode_container_two_variable() -> None:
+    t = TwoVariable(b"\x01\x02", b"\x03", U32(99))
+    # Fixed: offset_a(4) + offset_b(4) + U32(4) = 12 bytes
+    # offset_a = 12, offset_b = 14
+    expected = (
+        b"\x0c\x00\x00\x00"
+        b"\x0e\x00\x00\x00"
+        b"\x63\x00\x00\x00"
+        b"\x01\x02"
+        b"\x03"
+    )
+    assert ssz.encode(t) == expected
+
+
+# Task 8: Container decoding tests
+
+def test_decode_container_fixed() -> None:
+    data = (
+        b"\x01\x00\x00\x00\x00\x00\x00\x00"
+        b"\x02\x00\x00\x00\x00\x00\x00\x00"
+    )
+    result = ssz.decode_to(Point, data)
+    assert result == Point(U64(1), U64(2))
+
+
+def test_decode_container_variable() -> None:
+    data = (
+        b"\x01\x00\x00\x00"
+        b"\x08\x00\x00\x00"
+        b"\xaa\xbb"
+    )
+    result = ssz.decode_to(Variable, data)
+    assert result == Variable(U32(1), b"\xaa\xbb")
+
+
+def test_decode_container_two_variable() -> None:
+    data = (
+        b"\x0c\x00\x00\x00"
+        b"\x0e\x00\x00\x00"
+        b"\x63\x00\x00\x00"
+        b"\x01\x02"
+        b"\x03"
+    )
+    result = ssz.decode_to(TwoVariable, data)
+    assert result == TwoVariable(b"\x01\x02", b"\x03", U32(99))
+
+
+def test_round_trip_container_fixed() -> None:
+    original = Point(U64(12345), U64(67890))
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(Point, encoded)
+    assert decoded == original
+
+
+def test_round_trip_container_variable() -> None:
+    original = Variable(U32(42), b"\x01\x02\x03\x04\x05")
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(Variable, encoded)
+    assert decoded == original
+
+
+def test_decode_container_wrong_size() -> None:
+    with pytest.raises(DecodingError):
+        ssz.decode_to(Point, b"\x01\x00")
+
+
+@dataclass
+class Nested:
+    header: Point
+    value: U32
+
+
+def test_round_trip_nested_container() -> None:
+    original = Nested(Point(U64(1), U64(2)), U32(3))
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(Nested, encoded)
+    assert decoded == original
+
+
+@dataclass
+class Empty:
+    pass
+
+
+def test_encode_empty_container() -> None:
+    assert ssz.encode(Empty()) == b""
+
+
+def test_decode_empty_container() -> None:
+    result = ssz.decode_to(Empty, b"")
+    assert result == Empty()
+
+
+def test_decode_empty_container_extra_data() -> None:
+    with pytest.raises(DecodingError):
+        ssz.decode_to(Empty, b"\x00")
