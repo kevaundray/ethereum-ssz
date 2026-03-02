@@ -501,7 +501,15 @@ def _decode_container(cls: Any, data: bytes) -> Any:
         else:
             size = _fixed_size_of(field_type)
             field_data = data[pos : pos + size]
-            decoded_values[f.name] = _decode_value(field_type, field_data)
+            try:
+                decoded_values[f.name] = _decode_value(
+                    field_type, field_data
+                )
+            except DecodingError as e:
+                raise DecodingError(
+                    f"cannot decode field `{f.name}` of "
+                    f"{cls.__name__}"
+                ) from e
             pos += size
 
     # Decode variable fields
@@ -511,7 +519,12 @@ def _decode_container(cls: Any, data: bytes) -> Any:
         else:
             end = len(data)
         field_data = data[offset_val:end]
-        decoded_values[name] = _decode_value(field_type, field_data)
+        try:
+            decoded_values[name] = _decode_value(field_type, field_data)
+        except DecodingError as e:
+            raise DecodingError(
+                f"cannot decode field `{name}` of {cls.__name__}"
+            ) from e
 
     # Construct the dataclass
     kwargs = {f.name: decoded_values[f.name] for f in field_list}

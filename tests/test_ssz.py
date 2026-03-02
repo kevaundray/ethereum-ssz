@@ -562,3 +562,128 @@ def test_decode_union_no_match() -> None:
     # Let's test with a simpler scenario:
     with pytest.raises(DecodingError, match="no matching union variant"):
         ssz._decode_union(Union[Bytes4, Bytes32], b"\x00" * 5)
+
+
+# ======================================================================
+# Task 11: Integration tests (public API imports)
+# ======================================================================
+
+from ethereum_ssz import SSZ, MaxLength, With, decode_to, encode
+
+
+@dataclass
+class BeaconBlockHeader:
+    slot: U64
+    proposer_index: U64
+    parent_root: Bytes32
+    state_root: Bytes32
+    body_root: Bytes32
+
+
+def test_beacon_block_header_round_trip() -> None:
+    header = BeaconBlockHeader(
+        slot=U64(100),
+        proposer_index=U64(42),
+        parent_root=Bytes32(b"\x01" * 32),
+        state_root=Bytes32(b"\x02" * 32),
+        body_root=Bytes32(b"\x03" * 32),
+    )
+    encoded = encode(header)
+    assert len(encoded) == 112  # 2*8 + 3*32
+    decoded = decode_to(BeaconBlockHeader, encoded)
+    assert decoded == header
+
+
+@dataclass
+class Validator:
+    pubkey: Bytes48
+    withdrawal_credentials: Bytes32
+    effective_balance: U64
+    slashed: bool
+    activation_epoch: U64
+    exit_epoch: U64
+
+
+@dataclass
+class SimpleState:
+    genesis_time: U64
+    slot: U64
+    validators: Annotated[list[Validator], MaxLength(1099511627776)]
+
+
+def test_simple_state_round_trip() -> None:
+    v1 = Validator(
+        pubkey=Bytes48(b"\xaa" * 48),
+        withdrawal_credentials=Bytes32(b"\xbb" * 32),
+        effective_balance=U64(32000000000),
+        slashed=False,
+        activation_epoch=U64(0),
+        exit_epoch=U64(2**64 - 1),
+    )
+    v2 = Validator(
+        pubkey=Bytes48(b"\xcc" * 48),
+        withdrawal_credentials=Bytes32(b"\xdd" * 32),
+        effective_balance=U64(32000000000),
+        slashed=True,
+        activation_epoch=U64(100),
+        exit_epoch=U64(200),
+    )
+    state = SimpleState(
+        genesis_time=U64(1606824023),
+        slot=U64(1000000),
+        validators=[v1, v2],
+    )
+    encoded = encode(state)
+    decoded = decode_to(SimpleState, encoded)
+    assert decoded == state
+
+
+def test_ssz_protocol() -> None:
+    header = BeaconBlockHeader(
+        slot=U64(0),
+        proposer_index=U64(0),
+        parent_root=Bytes32(b"\x00" * 32),
+        state_root=Bytes32(b"\x00" * 32),
+        body_root=Bytes32(b"\x00" * 32),
+    )
+    assert isinstance(header, SSZ)
+
+
+# ======================================================================
+# Task 12: Error handling edge cases
+# ======================================================================
+
+from typing import Any, cast
+
+
+def test_encode_unsupported_type() -> None:
+    with pytest.raises(EncodingError, match="unsupported type"):
+        ssz.encode(cast(Any, 123))
+
+
+def test_encode_unsupported_str() -> None:
+    with pytest.raises(EncodingError, match="unsupported type"):
+        ssz.encode(cast(Any, "hello"))
+
+
+def test_chained_decoding_error() -> None:
+    @dataclass
+    class Inner:
+        value: U64
+
+    @dataclass
+    class Outer:
+        inner: Inner
+        flag: bool
+
+    # Inner needs 8 bytes, bool needs 1 = 9 total for Outer
+    # Provide 9 bytes but with inner containing only invalid-length
+    # data for the nested U64 — actually the fixed-size decoding
+    # will slice exactly 8 bytes for Inner, which then decodes fine.
+    # Instead: provide correct-size data but make the Inner's U64
+    # wrong by making Inner have a sub-container that fails.
+    # Simpler approach: Outer is 9 bytes. Give it exactly 9 bytes
+    # but with bool = 0x02 (invalid).
+    data = b"\x00" * 8 + b"\x02"
+    with pytest.raises(DecodingError, match="cannot decode field"):
+        ssz.decode_to(Outer, data)
