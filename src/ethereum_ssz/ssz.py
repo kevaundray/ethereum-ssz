@@ -9,8 +9,10 @@ from dataclasses import fields, is_dataclass
 from typing import (
     Annotated,
     Any,
+    Callable,
     Dict,
     Protocol,
+    Sequence,
     Type,
     TypeVar,
     Union,
@@ -54,6 +56,29 @@ Extended = Union[
     SSZ,
 ]
 
+Decoder = Callable[[bytes], Any]
+
+
+class MaxLength:
+    """
+    When used with Annotated, specifies the maximum length
+    of a List or variable-length bytes for Merkleization.
+    Ignored during serialization/deserialization.
+    """
+
+    def __init__(self, length: int) -> None:
+        self._length = length
+
+
+class With:
+    """
+    When used with Annotated, indicates that a value needs to be
+    decoded using a custom function.
+    """
+
+    def __init__(self, decoder: "Decoder") -> None:
+        self._decoder = decoder
+
 
 def encode(value: Extended) -> bytes:
     """
@@ -89,9 +114,13 @@ def _decode_value(class_: Any, data: bytes) -> Any:
     """
     Internal dispatch for decoding SSZ data to the appropriate type.
     """
-    # Unwrap Annotated types
-    while get_origin(class_) is Annotated:
-        class_ = get_args(class_)[0]
+    # Handle Annotated types via _decode_annotated
+    if get_origin(class_) is Annotated:
+        result, unwrapped = _decode_annotated(class_, data)
+        if result is not None:
+            return result
+        # unwrapped is the inner type, continue dispatch
+        class_ = unwrapped
 
     origin = get_origin(class_)
 
@@ -298,6 +327,8 @@ def _encode_value(value: Any, type_hint: object) -> bytes:
     while get_origin(type_hint) is Annotated:
         type_hint = get_args(type_hint)[0]
 
+    origin = get_origin(type_hint)
+
     # Dispatch by type hint
     if type_hint is bool:
         return b"\x01" if value else b"\x00"
@@ -312,9 +343,61 @@ def _encode_value(value: Any, type_hint: object) -> bytes:
     if is_dataclass(type_hint):
         return _encode_container(value)
 
+    # Generic type dispatch (list, tuple, Union, etc.)
+    if origin is list:
+        return _encode_list(value, type_hint)
+    if origin is tuple:
+        return _encode_tuple(value, type_hint)
+    if origin is not None and any(origin is ut for ut in _UNION_TYPES):
+        # For Union types, encode the value based on its runtime type
+        return encode(value)
+
     raise EncodingError(
         f"unsupported type hint for encoding: {type_hint}"
     )
+
+
+def _encode_list(value: Any, type_hint: object) -> bytes:
+    """Encode a list to SSZ bytes."""
+    args = get_args(type_hint)
+    element_type = args[0]
+    return _encode_sequence(value, element_type)
+
+
+def _encode_tuple(value: Any, type_hint: object) -> bytes:
+    """Encode a tuple to SSZ bytes."""
+    args = get_args(type_hint)
+    if len(args) == 2 and args[1] is Ellipsis:
+        # Homogeneous tuple: tuple[T, ...]
+        return _encode_sequence(value, args[0])
+    else:
+        # Heterogeneous fixed tuple: tuple[T1, T2, ...]
+        result = bytearray()
+        for v, t in zip(value, args):
+            result.extend(_encode_value(v, t))
+        return bytes(result)
+
+
+def _encode_sequence(values: Any, element_type: object) -> bytes:
+    """Encode a sequence of elements to SSZ bytes."""
+    if _is_fixed_size(element_type):
+        # Fixed-size elements: just concatenate
+        result = bytearray()
+        for v in values:
+            result.extend(_encode_value(v, element_type))
+        return bytes(result)
+    else:
+        # Variable-size elements: offset-based encoding
+        encoded_elements = [_encode_value(v, element_type) for v in values]
+        offsets_size = len(values) * BYTES_PER_LENGTH_OFFSET
+        result = bytearray()
+        offset = offsets_size
+        for encoded in encoded_elements:
+            result.extend(struct.pack("<I", offset))
+            offset += len(encoded)
+        for encoded in encoded_elements:
+            result.extend(encoded)
+        return bytes(result)
 
 
 def _encode_container(value: Any) -> bytes:
@@ -437,4 +520,147 @@ def _decode_container(cls: Any, data: bytes) -> Any:
 
 def _decode_annotation(class_: Any, data: bytes) -> Any:
     """Decode SSZ bytes using a generic annotation (Union, Tuple, List)."""
-    raise NotImplementedError("annotation decoding not yet implemented")
+    origin = get_origin(class_)
+
+    if origin is not None and any(origin is ut for ut in _UNION_TYPES):
+        return _decode_union(class_, data)
+    if origin is tuple:
+        return _decode_tuple(class_, data)
+    if origin is list:
+        return _decode_list(class_, data)
+
+    raise DecodingError(
+        f"unsupported annotation for SSZ decoding: {class_}"
+    )
+
+
+def _decode_annotated(annotation: Any, data: bytes) -> tuple:
+    """
+    Decode an Annotated type.
+
+    Returns (result, None) if a With codec handled decoding,
+    or (None, unwrapped_type) if Annotated should be unwrapped
+    and dispatch should continue.
+    """
+    args = get_args(annotation)
+    metadata = args[1:]  # annotation.__metadata__ equivalent
+
+    with_codecs = [m for m in metadata if isinstance(m, With)]
+    if len(with_codecs) > 1:
+        raise DecodingError("multiple ssz.With annotations")
+    if len(with_codecs) == 1:
+        codec = with_codecs[0]
+        result = codec._decoder(data)
+        return (result, None)
+
+    # No With found: unwrap and continue dispatch
+    inner = args[0]
+    # Continue unwrapping if still Annotated
+    while get_origin(inner) is Annotated:
+        inner_args = get_args(inner)
+        inner_metadata = inner_args[1:]
+        inner_with = [m for m in inner_metadata if isinstance(m, With)]
+        if len(inner_with) > 1:
+            raise DecodingError("multiple ssz.With annotations")
+        if len(inner_with) == 1:
+            result = inner_with[0]._decoder(data)
+            return (result, None)
+        inner = inner_args[0]
+
+    return (None, inner)
+
+
+def _decode_list(annotation: Any, data: bytes) -> list:
+    """Decode SSZ bytes to a list."""
+    args = get_args(annotation)
+    element_type = args[0]
+    return _decode_sequence(data, element_type)
+
+
+def _decode_tuple(annotation: Any, data: bytes) -> tuple:
+    """Decode SSZ bytes to a tuple."""
+    args = get_args(annotation)
+    if len(args) == 2 and args[1] is Ellipsis:
+        # Homogeneous tuple: tuple[T, ...]
+        return tuple(_decode_sequence(data, args[0]))
+    else:
+        # Heterogeneous fixed tuple
+        pos = 0
+        values = []
+        for t in args:
+            size = _fixed_size_of(t)
+            element_data = data[pos : pos + size]
+            values.append(_decode_value(t, element_data))
+            pos += size
+        return tuple(values)
+
+
+def _decode_sequence(data: bytes, element_type: object) -> list:
+    """Decode SSZ bytes to a list of elements."""
+    if len(data) == 0:
+        return []
+
+    if _is_fixed_size(element_type):
+        element_size = _fixed_size_of(element_type)
+        if len(data) % element_size != 0:
+            raise DecodingError(
+                f"data length {len(data)} is not a multiple of "
+                f"element size {element_size}"
+            )
+        result = []
+        for i in range(0, len(data), element_size):
+            element_data = data[i : i + element_size]
+            result.append(_decode_value(element_type, element_data))
+        return result
+    else:
+        # Variable-size elements: offset-based decoding
+        if len(data) < BYTES_PER_LENGTH_OFFSET:
+            raise DecodingError(
+                "data too short for variable-size sequence"
+            )
+        first_offset = struct.unpack_from("<I", data, 0)[0]
+        if first_offset % BYTES_PER_LENGTH_OFFSET != 0:
+            raise DecodingError(
+                f"invalid first offset {first_offset}: "
+                f"not a multiple of {BYTES_PER_LENGTH_OFFSET}"
+            )
+        num_elements = first_offset // BYTES_PER_LENGTH_OFFSET
+
+        offsets = []
+        for i in range(num_elements):
+            offset = struct.unpack_from(
+                "<I", data, i * BYTES_PER_LENGTH_OFFSET
+            )[0]
+            offsets.append(offset)
+
+        result = []
+        for i in range(num_elements):
+            start = offsets[i]
+            if i + 1 < num_elements:
+                end = offsets[i + 1]
+            else:
+                end = len(data)
+            element_data = data[start:end]
+            result.append(_decode_value(element_type, element_data))
+        return result
+
+
+def _decode_union(annotation: Any, data: bytes) -> Any:
+    """Decode SSZ bytes by trying each variant of a Union type."""
+    args = get_args(annotation)
+    successes = []
+    failures = []
+
+    for variant in args:
+        try:
+            result = _decode_value(variant, data)
+            successes.append(result)
+        except (DecodingError, Exception):
+            failures.append(variant)
+
+    if len(successes) == 1:
+        return successes[0]
+    elif len(successes) == 0:
+        raise DecodingError("no matching union variant")
+    else:
+        raise DecodingError("multiple matching union variants")

@@ -1,12 +1,12 @@
 import pytest
 from dataclasses import dataclass
-from typing import Annotated, List, Tuple, Union
+from typing import Annotated, List, List as TypingList, Tuple, Union
 
 from ethereum_types.bytes import Bytes, Bytes4, Bytes32, Bytes48, Bytes96
 from ethereum_types.numeric import U8, U16, U32, U64, U256, Uint
 
 from ethereum_ssz import ssz
-from ethereum_ssz.ssz import _is_fixed_size, _fixed_size_of
+from ethereum_ssz.ssz import _is_fixed_size, _fixed_size_of, MaxLength, With
 from ethereum_ssz.exceptions import DecodingError, EncodingError, SSZException
 
 
@@ -367,3 +367,198 @@ def test_decode_empty_container() -> None:
 def test_decode_empty_container_extra_data() -> None:
     with pytest.raises(DecodingError):
         ssz.decode_to(Empty, b"\x00")
+
+
+# Task 9: List tests
+
+@dataclass
+class WithList:
+    values: list[U64]
+
+def test_encode_container_with_list() -> None:
+    w = WithList([U64(1), U64(2), U64(3)])
+    expected = (
+        b"\x04\x00\x00\x00"
+        + b"\x01\x00\x00\x00\x00\x00\x00\x00"
+        + b"\x02\x00\x00\x00\x00\x00\x00\x00"
+        + b"\x03\x00\x00\x00\x00\x00\x00\x00"
+    )
+    assert ssz.encode(w) == expected
+
+def test_decode_container_with_list() -> None:
+    data = (
+        b"\x04\x00\x00\x00"
+        + b"\x01\x00\x00\x00\x00\x00\x00\x00"
+        + b"\x02\x00\x00\x00\x00\x00\x00\x00"
+        + b"\x03\x00\x00\x00\x00\x00\x00\x00"
+    )
+    result = ssz.decode_to(WithList, data)
+    assert result == WithList([U64(1), U64(2), U64(3)])
+
+def test_round_trip_empty_list() -> None:
+    original = WithList([])
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(WithList, encoded)
+    assert decoded == original
+
+@dataclass
+class WithVariableList:
+    items: list[bytes]
+
+def test_encode_variable_element_list() -> None:
+    w = WithVariableList([b"\x01\x02", b"\x03"])
+    container_offset = b"\x04\x00\x00\x00"
+    list_data = (
+        b"\x08\x00\x00\x00"
+        b"\x0a\x00\x00\x00"
+        b"\x01\x02"
+        b"\x03"
+    )
+    assert ssz.encode(w) == container_offset + list_data
+
+def test_round_trip_variable_element_list() -> None:
+    original = WithVariableList([b"\x01\x02", b"\x03\x04\x05"])
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(WithVariableList, encoded)
+    assert decoded == original
+
+# Task 9: Tuple tests
+
+@dataclass
+class WithFixedTuple:
+    point: Tuple[U64, U32]
+
+def test_encode_fixed_tuple() -> None:
+    w = WithFixedTuple((U64(1), U32(2)))
+    expected = (
+        b"\x01\x00\x00\x00\x00\x00\x00\x00"
+        b"\x02\x00\x00\x00"
+    )
+    assert ssz.encode(w) == expected
+
+def test_round_trip_fixed_tuple() -> None:
+    original = WithFixedTuple((U64(100), U32(200)))
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(WithFixedTuple, encoded)
+    assert decoded == original
+
+@dataclass
+class WithHomogeneousTuple:
+    values: Tuple[U64, ...]
+
+def test_encode_homogeneous_tuple() -> None:
+    w = WithHomogeneousTuple((U64(1), U64(2)))
+    expected = (
+        b"\x04\x00\x00\x00"
+        + b"\x01\x00\x00\x00\x00\x00\x00\x00"
+        + b"\x02\x00\x00\x00\x00\x00\x00\x00"
+    )
+    assert ssz.encode(w) == expected
+
+def test_round_trip_homogeneous_tuple() -> None:
+    original = WithHomogeneousTuple((U64(10), U64(20), U64(30)))
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(WithHomogeneousTuple, encoded)
+    assert decoded == original
+
+def test_decode_list_wrong_element_size() -> None:
+    @dataclass
+    class BadList:
+        items: list[U64]
+    data = b"\x04\x00\x00\x00" + b"\x00" * 7
+    with pytest.raises(DecodingError):
+        ssz.decode_to(BadList, data)
+
+# Task 10: MaxLength tests
+
+@dataclass
+class WithMaxLength:
+    data: Annotated[list[U64], MaxLength(1024)]
+
+def test_encode_with_max_length() -> None:
+    w = WithMaxLength([U64(1), U64(2)])
+    expected = (
+        b"\x04\x00\x00\x00"
+        + b"\x01\x00\x00\x00\x00\x00\x00\x00"
+        + b"\x02\x00\x00\x00\x00\x00\x00\x00"
+    )
+    assert ssz.encode(w) == expected
+
+def test_round_trip_with_max_length() -> None:
+    original = WithMaxLength([U64(10), U64(20)])
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(WithMaxLength, encoded)
+    assert decoded == original
+
+@dataclass
+class WithAnnotatedBytes:
+    extra_data: Annotated[bytes, MaxLength(32)]
+
+def test_round_trip_annotated_bytes() -> None:
+    original = WithAnnotatedBytes(b"\xab\xcd\xef")
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(WithAnnotatedBytes, encoded)
+    assert decoded == original
+
+# Task 10: With (custom codec) tests
+
+def decode_custom(data: bytes) -> U64:
+    return U64.from_le_bytes(data)
+
+@dataclass
+class WithCustomCodec:
+    value: Annotated[U64, With(decode_custom)]
+
+def test_decode_with_custom_codec() -> None:
+    data = ssz.encode(WithCustomCodec(U64(42)))
+    result = ssz.decode_to(WithCustomCodec, data)
+    assert result == WithCustomCodec(U64(42))
+
+@dataclass
+class WithUnrelatedAnnotated:
+    foo: Annotated[U64, "ignore me!"]
+
+def test_round_trip_unrelated_annotated() -> None:
+    original = WithUnrelatedAnnotated(U64(99))
+    encoded = ssz.encode(original)
+    decoded = ssz.decode_to(WithUnrelatedAnnotated, encoded)
+    assert decoded == original
+
+@dataclass
+class WithTwoWith:
+    foo: Annotated[U64, With(decode_custom), With(decode_custom)]
+
+def test_decode_two_with_raises() -> None:
+    with pytest.raises(DecodingError, match="multiple ssz.With"):
+        ssz.decode_to(WithTwoWith, b"\x00" * 8)
+
+# Task 10: Union tests
+
+@dataclass
+class WithUnion:
+    value: Union[Bytes4, bool]
+
+def test_decode_union_left() -> None:
+    # Bytes4 matches 4-byte data, bool doesn't (needs 1 byte)
+    w = WithUnion(Bytes4(b"\x01\x02\x03\x04"))
+    data = ssz.encode(w)
+    result = ssz.decode_to(WithUnion, data)
+    assert result.value == Bytes4(b"\x01\x02\x03\x04")
+
+def test_decode_union_right() -> None:
+    w = WithUnion(True)
+    data = ssz.encode(w)
+    result = ssz.decode_to(WithUnion, data)
+    assert result.value is True
+
+def test_decode_union_no_match() -> None:
+    @dataclass
+    class BadUnion:
+        value: Union[Bytes4, Bytes32]
+    # 5 bytes matches neither Bytes4 (needs 4) nor Bytes32 (needs 32)
+    # We need to construct raw data that would trigger this in a container
+    # Container: the value field. For a fixed-size union... hmm.
+    # Actually unions of different fixed sizes are tricky.
+    # Let's test with a simpler scenario:
+    with pytest.raises(DecodingError, match="no matching union variant"):
+        ssz._decode_union(Union[Bytes4, Bytes32], b"\x00" * 5)
