@@ -768,7 +768,7 @@ def test_decode_container_offset_before_fixed_part() -> None:
         + struct.pack("<I", 12)  # offset for b = 12
         + struct.pack("<I", 99)  # fixed = 99
     )
-    with pytest.raises(DecodingError, match="before the end of the fixed part"):
+    with pytest.raises(DecodingError, match="does not match fixed part size"):
         ssz.decode_to(TwoVariable, data)
 
 
@@ -788,15 +788,22 @@ def test_decode_container_offset_beyond_data() -> None:
 def test_decode_container_offsets_not_monotonic() -> None:
     """Non-monotonically increasing offsets raise DecodingError."""
     import struct
+
+    @dataclass
+    class ThreeVariable:
+        a: bytes
+        b: bytes
+        c: bytes
+
+    # fixed_part_size = 4 + 4 + 4 = 12
     data = (
-        struct.pack("<I", 14)   # offset for a = 14
-        + struct.pack("<I", 12) # offset for b = 12 (< 14, not monotonic)
-        + struct.pack("<I", 99) # fixed = 99
-        + b"\x01\x02"          # some variable data
-        + b"\x03"
+        struct.pack("<I", 12)   # offset for a = 12 (valid)
+        + struct.pack("<I", 15) # offset for b = 15
+        + struct.pack("<I", 13) # offset for c = 13 (< 15, not monotonic)
+        + b"\x01\x02\x03\x04\x05"
     )
     with pytest.raises(DecodingError, match="less than the previous offset"):
-        ssz.decode_to(TwoVariable, data)
+        ssz.decode_to(ThreeVariable, data)
 
 
 def test_decode_sequence_offset_beyond_data() -> None:
@@ -816,11 +823,12 @@ def test_decode_sequence_offset_beyond_data() -> None:
 def test_decode_sequence_offsets_not_monotonic() -> None:
     """Variable-size sequence with non-monotonic offsets raises DecodingError."""
     import struct
-    # Two elements: first_offset = 8, so num_elements = 2
-    # offsets: [8, 7] — 7 < 8, not monotonic
+    # Three elements: first_offset = 12, so num_elements = 3
+    # offsets: [12, 15, 13] — 13 < 15, not monotonic
     data = (
-        struct.pack("<I", 8)
-        + struct.pack("<I", 7)  # less than previous
+        struct.pack("<I", 12)
+        + struct.pack("<I", 15)
+        + struct.pack("<I", 13)  # less than previous
         + b"\x01\x02\x03\x04\x05\x06\x07\x08"
     )
     with pytest.raises(DecodingError, match="less than the previous offset"):

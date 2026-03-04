@@ -514,11 +514,11 @@ def _decode_container(cls: Any, data: bytes) -> Any:
 
     # Validate variable field offsets
     for i, (name, field_type, offset_val) in enumerate(variable_fields):
-        if offset_val < fixed_part_size:
+        if i == 0 and offset_val != fixed_part_size:
             raise DecodingError(
-                f"offset {offset_val} for field `{name}` of "
-                f"{cls.__name__} is before the end of the fixed "
-                f"part ({fixed_part_size})"
+                f"first variable offset {offset_val} for field "
+                f"`{name}` of {cls.__name__} does not match "
+                f"fixed part size ({fixed_part_size})"
             )
         if offset_val > len(data):
             raise DecodingError(
@@ -660,6 +660,11 @@ def _decode_sequence(data: bytes, element_type: object) -> list:
                 f"invalid first offset {first_offset}: "
                 f"not a multiple of {BYTES_PER_LENGTH_OFFSET}"
             )
+        if first_offset > len(data):
+            raise DecodingError(
+                f"first offset {first_offset} is beyond "
+                f"the data length ({len(data)})"
+            )
         num_elements = first_offset // BYTES_PER_LENGTH_OFFSET
 
         offsets = []
@@ -671,6 +676,12 @@ def _decode_sequence(data: bytes, element_type: object) -> list:
 
         # Validate offsets
         for i, offset in enumerate(offsets):
+            if offset < first_offset:
+                raise DecodingError(
+                    f"offset {offset} at index {i} points into "
+                    f"the offsets region (first_offset="
+                    f"{first_offset})"
+                )
             if offset > len(data):
                 raise DecodingError(
                     f"offset {offset} at index {i} is beyond "
